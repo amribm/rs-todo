@@ -1,6 +1,6 @@
-use rs_todo::{command, Todo};
+use rs_todo::{command, Todo, TodoAppError};
 
-fn main() {
+fn main() -> Result<(), TodoAppError> {
     let matches = command().get_matches();
 
     let mut todo = match Todo::new() {
@@ -13,8 +13,8 @@ fn main() {
     match matches.subcommand() {
         Some(("add", sub_matches)) => {
             let todos = sub_matches
-                .get_many::<String>("TODO")
-                .unwrap_or_default()
+                .get_many::<String>("TODOS")
+                .ok_or(TodoAppError::InvalidType)?
                 .map(|v| v.as_str())
                 .collect::<Vec<_>>();
 
@@ -26,26 +26,30 @@ fn main() {
         Some(("rm", _)) => {}
         Some(("done", sub_matches)) => {
             let indexes = sub_matches
-                .get_many::<String>("INDEXES")
-                .unwrap_or_default()
-                .map(|x| x.parse::<usize>().unwrap())
+                .get_many("INDEXES")
+                .ok_or(TodoAppError::InvalidType)?
+                .map(|x| *x)
                 .collect::<Vec<_>>();
             let _ = todo.done(indexes).is_err_and(|e| panic!("error: {}", e));
         }
         Some(("edit", sub_matches)) => {
-            let args = sub_matches
-                .get_many::<String>("TODO")
-                .unwrap_or_default()
-                .map(|x| x.to_string())
-                .collect::<Vec<_>>();
+            let index = sub_matches
+                .get_one("INDEX")
+                .ok_or(TodoAppError::InvalidType)?;
 
-            let _ = todo.edit(args).is_err_and(|e| panic!("error: {}", e));
+            let replacement = sub_matches
+                .get_one::<String>("TODO")
+                .ok_or(TodoAppError::InvalidType)?;
+
+            let _ = todo
+                .edit(*index, replacement.to_string())
+                .is_err_and(|e| panic!("error: {}", e));
         }
         Some(("sort", _)) => {}
         Some(("remove", sub_matches)) => {
             let indexes = sub_matches
                 .get_many::<String>("INDEXES")
-                .unwrap_or_default()
+                .ok_or(TodoAppError::InvalidType)?
                 .map(|x| x.parse::<usize>().unwrap())
                 .collect::<Vec<_>>();
             let _ = todo.remove(indexes).is_err_and(|e| panic!("error: {}", e));
@@ -53,4 +57,5 @@ fn main() {
         Some(("restore", _)) => {}
         _ => println!("hello world!"),
     }
+    Ok(())
 }

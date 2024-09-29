@@ -1,10 +1,27 @@
-use clap::{arg, command, ArgAction, Command};
+use clap::{command, value_parser, Arg, ArgAction, Command};
 use colored::*;
-use std::env;
 use std::fs::OpenOptions;
 use std::io::{stdout, BufReader, BufWriter, Read, Write};
+use std::{env, io};
+use thiserror::Error;
 
-type Error = Box<dyn std::error::Error>;
+#[derive(Debug, Error)]
+pub enum TodoAppError {
+    #[error(transparent)]
+    Io(#[from] io::Error),
+
+    #[error("invalid argument type")]
+    InvalidType,
+
+    #[error("invalid number of arguments")]
+    InvalidNumberOfArgs,
+
+    #[error("given index: {} doesn't match any todo",.0)]
+    IncorrectIndex(usize),
+
+    #[error("env $HOME doesn't exist")]
+    HomeNotFound,
+}
 
 const EXECUTABLE_NAME: &str = "rs-todo";
 
@@ -14,27 +31,43 @@ pub fn command() -> Command {
         .about("Simple Todo app")
         .subcommand(
             Command::new("add").arg(
-                arg!([TODO])
+                Arg::new("TODOS")
                     .help("todos to append")
-                    .action(ArgAction::Append),
+                    .action(ArgAction::Append)
+                    .required(true),
             ),
         )
         .subcommand(Command::new("list"))
         .subcommand(
             Command::new("done").arg(
-                arg!([INDEXES])
+                Arg::new("INDEXES")
                     .help("todos numbers to mark as done")
-                    .action(ArgAction::Append),
+                    .value_parser(value_parser!(usize))
+                    .action(ArgAction::Append)
+                    .required(true),
             ),
         )
         .subcommand(
-            Command::new("edit").arg(arg!([TODO]).help("todo to edit").action(ArgAction::Append)),
+            Command::new("edit")
+                .arg(
+                    Arg::new("INDEX")
+                        .help("index of the todo to be edited")
+                        .value_parser(value_parser!(usize))
+                        .allow_negative_numbers(false)
+                        .required(true),
+                )
+                .arg(
+                    Arg::new("TODO")
+                        .help("replacement to todo for exsiting todo")
+                        .required(true),
+                ),
         )
         .subcommand(
             Command::new("remove").arg(
-                arg!([INDEXES])
+                Arg::new("INDEXES")
                     .help("todos numbers to remove")
-                    .action(ArgAction::Append),
+                    .action(ArgAction::Append)
+                    .required(true),
             ),
         )
 }
@@ -42,13 +75,11 @@ pub fn command() -> Command {
 pub struct Todo {
     todos: Vec<String>,
     todo_path: String,
-    todo_backup: String,
-    no_backup: bool,
 }
 
 impl Todo {
-    pub fn new() -> Result<Todo, Error> {
-        let home = env::var("HOME")?;
+    pub fn new() -> Result<Todo, TodoAppError> {
+        let home = env::var("HOME").or(Err(TodoAppError::HomeNotFound))?;
 
         let todo_path: String = match env::var("TODO_PATH") {
             Ok(t) => t,
@@ -56,13 +87,6 @@ impl Todo {
                 format!("{}/.todo", home)
             }
         };
-
-        let todo_bak: String = match env::var("TODO_BACKUP_DIR") {
-            Ok(b) => b,
-            Err(_) => String::from("/tmp/todo.bak"),
-        };
-
-        let no_backup = env::var("TODO_BACKUP").is_ok();
 
         let todofile = OpenOptions::new()
             .read(true)
@@ -80,14 +104,12 @@ impl Todo {
         let todo = contents.lines().map(str::to_string).collect();
 
         Ok(Self {
-            todo_backup: todo_bak,
             todo_path,
             todos: todo,
-            no_backup,
         })
     }
 
-    pub fn list(self) -> Result<(), Error> {
+    pub fn list(self) -> Result<(), TodoAppError> {
         let mut buffer = BufWriter::new(stdout());
 
         let mut data = String::new();
@@ -106,9 +128,9 @@ impl Todo {
         Ok(())
     }
 
-    pub fn add(&mut self, todos: Vec<&str>) -> Result<(), Error> {
+    pub fn add(&mut self, todos: Vec<&str>) -> Result<(), TodoAppError> {
         if todos.is_empty() {
-            return Err("need one or more todos".into());
+            return Err(TodoAppError::InvalidNumberOfArgs);
         }
 
         let todofile = OpenOptions::new()
@@ -133,14 +155,14 @@ impl Todo {
         Ok(())
     }
 
-    pub fn done(&mut self, indexs: Vec<usize>) -> Result<(), Error> {
+    pub fn done(&mut self, indexs: Vec<usize>) -> Result<(), TodoAppError> {
         if indexs.is_empty() {
-            return Err("rs-todo takes atleast one argument".into());
+            return Err(TodoAppError::InvalidNumberOfArgs);
         }
 
         for ind in indexs {
             if self.todos.len() < ind - 1 {
-                return Err(format!("incorrect index: {}", ind).into());
+                return Err(TodoAppError::IncorrectIndex(ind));
             }
             self.todos[ind - 1] = format!("[*] {}", &self.todos[ind - 1][4..])
         }
@@ -157,11 +179,7 @@ impl Todo {
         Ok(())
     }
 
-    pub fn edit(&mut self, args: Vec<String>) -> Result<(), Error> {
-        if args.len() < 2 {
-            return Err("edit expects atleast two arguments [INDEX] [TODO]".into());
-        }
-
+    pub fn edit(&mut self, index: usize, replacement_todo: String) -> Result<(), TodoAppError> {
         let todo_path = OpenOptions::new()
             .write(true)
             .truncate(true)
@@ -170,13 +188,13 @@ impl Todo {
         let mut buffer = BufWriter::new(&todo_path);
 
         for (ind, todo) in self.todos.iter_mut().enumerate() {
-            if !args[0].contains(&(ind + 1).to_string()) {
+            if ind + 1 != index {
                 let data = format!("{}\n", todo);
                 buffer.write_all(data.as_bytes())?;
                 continue;
             }
 
-            let data = format!("{}{}\n", &todo[..4], args[1]);
+            let data = format!("{}{}\n", &todo[..4], replacement_todo);
 
             buffer.write_all(data.as_bytes())?;
         }
@@ -184,9 +202,9 @@ impl Todo {
         Ok(())
     }
 
-    pub fn remove(&mut self, args: Vec<usize>) -> Result<(), Error> {
+    pub fn remove(&mut self, args: Vec<usize>) -> Result<(), TodoAppError> {
         if args.is_empty() {
-            return Err("remove expects atleast one arguments [INDEX]".into());
+            return Err(TodoAppError::InvalidNumberOfArgs);
         }
 
         let todo_path = OpenOptions::new()
@@ -202,7 +220,6 @@ impl Todo {
             }
             let data = format!("{}\n", todo);
 
-            println!("args not contains: {}", data);
             buffer.write_all(data.as_bytes())?;
         }
 
