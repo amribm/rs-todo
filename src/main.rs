@@ -6,7 +6,7 @@ fn main() -> Result<(), TodoAppError> {
     let mut todo = match Todo::new() {
         Ok(t) => t,
         Err(e) => {
-            panic!("unable to run todo manager due to e: {}", e)
+            panic!("unable to run todo manager due to error: {}", e)
         }
     };
 
@@ -23,7 +23,6 @@ fn main() -> Result<(), TodoAppError> {
         Some(("list", _)) => {
             let _ = todo.list().is_err_and(|e| panic!("error: {}", e));
         }
-        Some(("rm", _)) => {}
         Some(("done", sub_matches)) => {
             let indexes = sub_matches
                 .get_many("INDEXES")
@@ -45,7 +44,6 @@ fn main() -> Result<(), TodoAppError> {
                 .edit(*index, replacement.to_string())
                 .is_err_and(|e| panic!("error: {}", e));
         }
-        Some(("sort", _)) => {}
         Some(("remove", sub_matches)) => {
             let indexes = sub_matches
                 .get_many::<String>("INDEXES")
@@ -54,7 +52,6 @@ fn main() -> Result<(), TodoAppError> {
                 .collect::<Vec<_>>();
             let _ = todo.remove(indexes).is_err_and(|e| panic!("error: {}", e));
         }
-        Some(("restore", _)) => {}
         _ => println!("hello world!"),
     }
     Ok(())

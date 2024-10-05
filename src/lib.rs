@@ -1,9 +1,14 @@
 use clap::{command, value_parser, Arg, ArgAction, Command};
 use colored::*;
-use std::fs::OpenOptions;
-use std::io::{stdout, BufReader, BufWriter, Read, Write};
+use std::fs::{self};
+use std::io::{stdout, BufWriter, Write};
+use std::path::Path;
 use std::{env, io};
 use thiserror::Error;
+
+mod db;
+
+use db::DB;
 
 #[derive(Debug, Error)]
 pub enum TodoAppError {
@@ -21,6 +26,9 @@ pub enum TodoAppError {
 
     #[error("env $HOME doesn't exist")]
     HomeNotFound,
+
+    #[error(transparent)]
+    SqliteErr(#[from] rusqlite::Error),
 }
 
 const EXECUTABLE_NAME: &str = "rs-todo";
@@ -73,8 +81,8 @@ pub fn command() -> Command {
 }
 
 pub struct Todo {
-    todos: Vec<String>,
-    todo_path: String,
+    todos: Vec<Task>,
+    db: DB,
 }
 
 impl Todo {
@@ -84,44 +92,32 @@ impl Todo {
         let todo_path: String = match env::var("TODO_PATH") {
             Ok(t) => t,
             Err(_) => {
-                format!("{}/.todo", home)
+                format!("{}/.todo/todo.db", home)
             }
         };
 
-        let todofile = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(&todo_path)
-            .expect("Can't open todo file");
+        let path = Path::new(&todo_path);
 
-        let mut buf_reader = BufReader::new(todofile);
+        if !path.exists() {
+            let _ = fs::File::create(path)?;
+        }
 
-        let mut contents = String::new();
+        let db = DB::new(path)?;
 
-        buf_reader.read_to_string(&mut contents)?;
+        let todos = db.get_todos()?;
 
-        let todo = contents.lines().map(str::to_string).collect();
-
-        Ok(Self {
-            todo_path,
-            todos: todo,
-        })
+        Ok(Self { todos, db })
     }
 
     pub fn list(self) -> Result<(), TodoAppError> {
         let mut buffer = BufWriter::new(stdout());
 
-        let mut data = String::new();
-
-        for (index, line) in self.todos.into_iter().enumerate() {
-            let symbol = &line[..4];
-            let task = &line[4..];
-            if "[ ] " == symbol {
-                data = format!("{}. {}\n", index + 1, task);
-            } else if "[*] " == symbol {
-                data = format!("{}. {}\n", index + 1, task.strikethrough());
-            }
+        for task in self.todos {
+            let data = if !task.done {
+                format!("{}. {}\n", task.id, task.name)
+            } else {
+                format!("{}. {}\n", task.id, task.name.strikethrough())
+            };
 
             buffer.write_all(data.as_bytes())?;
         }
@@ -133,25 +129,15 @@ impl Todo {
             return Err(TodoAppError::InvalidNumberOfArgs);
         }
 
-        let todofile = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .append(true)
-            .open(&self.todo_path)
-            .expect("can't open Todo file");
-
-        let mut buffer = BufWriter::new(todofile);
+        let mut last_index = self.todos.len();
 
         for todo in todos {
-            if todo.trim().is_empty() {
-                continue;
-            }
+            last_index += 1;
+            let task = Task::new(last_index, todo.to_string(), false);
 
-            let line = format!("[ ] {}\n", todo);
-
-            buffer.write_all(line.as_bytes())?;
+            self.db.insert_todo(task)?;
         }
+
         Ok(())
     }
 
@@ -164,65 +150,65 @@ impl Todo {
             if self.todos.len() < ind - 1 {
                 return Err(TodoAppError::IncorrectIndex(ind));
             }
-            self.todos[ind - 1] = format!("[*] {}", &self.todos[ind - 1][4..])
-        }
-
-        let todo_path = OpenOptions::new().write(true).open(&self.todo_path)?;
-
-        let mut buffer = BufWriter::new(todo_path);
-
-        for todo in self.todos.iter() {
-            let data = format!("{}\n", &todo);
-            buffer.write_all(data.as_bytes())?;
+            let task = &mut self.todos[ind - 1];
+            task.done = true;
+            self.db.edit_todo(task)?;
         }
 
         Ok(())
     }
 
     pub fn edit(&mut self, index: usize, replacement_todo: String) -> Result<(), TodoAppError> {
-        let todo_path = OpenOptions::new()
-            .write(true)
-            .truncate(true)
-            .open(&self.todo_path)?;
+        let task = &mut self
+            .todos
+            .get_mut(index - 1)
+            .ok_or(TodoAppError::IncorrectIndex(index))?;
 
-        let mut buffer = BufWriter::new(&todo_path);
+        task.name = replacement_todo;
 
-        for (ind, todo) in self.todos.iter_mut().enumerate() {
-            if ind + 1 != index {
-                let data = format!("{}\n", todo);
-                buffer.write_all(data.as_bytes())?;
-                continue;
-            }
-
-            let data = format!("{}{}\n", &todo[..4], replacement_todo);
-
-            buffer.write_all(data.as_bytes())?;
-        }
+        self.db.edit_todo(&task)?;
 
         Ok(())
     }
 
-    pub fn remove(&mut self, args: Vec<usize>) -> Result<(), TodoAppError> {
+    pub fn remove(self, args: Vec<usize>) -> Result<(), TodoAppError> {
         if args.is_empty() {
             return Err(TodoAppError::InvalidNumberOfArgs);
         }
 
-        let todo_path = OpenOptions::new()
-            .write(true)
-            .truncate(true)
-            .open(&self.todo_path)?;
+        self.db.delete_all_rows()?;
 
-        let mut buffer = BufWriter::new(&todo_path);
-
-        for (ind, todo) in self.todos.iter().enumerate() {
-            if args.contains(&(ind + 1)) {
+        let mut count = 1;
+        for task in self.todos {
+            if args.contains(&task.id) {
                 continue;
             }
-            let data = format!("{}\n", todo);
 
-            buffer.write_all(data.as_bytes())?;
+            self.db.insert_todo(Task::from(task, count))?;
+            count += 1;
         }
 
         Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct Task {
+    id: usize,
+    name: String,
+    done: bool,
+}
+
+impl Task {
+    fn new(id: usize, name: String, done: bool) -> Task {
+        Task { id, name, done }
+    }
+
+    fn from(task: Task, id: usize) -> Task {
+        Task {
+            id,
+            name: task.name,
+            done: task.done,
+        }
     }
 }

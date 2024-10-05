@@ -6,4 +6,5 @@ edition = "2021"
 [dependencies]
 clap = { version = "4.5.17", features = ["cargo"] }
 colored = "2.1.0"
+rusqlite = "0.32.1"
 thiserror = "1.0.64"
